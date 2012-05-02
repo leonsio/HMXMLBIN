@@ -1,0 +1,11 @@
+# default: on
+# description: Homematic XML-RPC to BIN-RPC converter
+service hmxmlbin
+{
+       socket_type    = stream
+       wait           = no
+       user           = root
+       server         = /usr/bin/hmxmlbin
+       disable        = no
+       port           = 8701
+}

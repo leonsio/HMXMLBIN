@@ -1,0 +1,43 @@
+Hallo,
+
+diese Anwendung ist vor allem für die Leute interessant, die Informationen von an eine CCU angeschlossenen CUxD abfragen wollen.
+Sei es zur statistischen Zwecken (Historian), oder um die Komponenten aus eigenen Skripten heraus zu steuern bzw. zu überwachen.
+
+Die Anwendung unterstützt aber auch jedes andere Interface der CCU und ist nicht nur an den CUxD beschränkt.
+
+Da der CUxD kein XMl-RPC versteht und nur (undokumentiertes) BIN-RPC versteht, ist es nicht möglich per XML-RPC auf die Geräte zuzugreifen.
+Der BIN-RPC Converter übernimmt als Übersetzer die Aufgabe die XML-RPC Befehle in BIN-RPC umzuwandeln, und die BIN-RPC Ausgabe zurück als XML-RPC darzustellen.
+
+Die Funktionsweise des Konverters ist Bidirektional, es können über ihn Befehle in BIN-RPC an einen XML-RPC fähigen Server geschickt werden (INIT/EVENT), als auch per XML-RPC ein BIN-RPC fähiges Gerät abgefragt werden.
+
+Für die Befehle INIT und die dazugehörige EVENT Benachrichtigung ist CUxD in Version 0.563 oder höher notwendig, die Abfrage bzw. das Setzen der Zustände kann mit jeder CUxD Version erfolgen.
+
+Installation:
+
+Der Converter ist in PHP geschrieben und benötigt eine CLI Umgebung inkl. XMLRPC Extenstion (oft bereits einkompiliert).
+Der Skript liest die Daten per STDIN und gibt die Ausgabe per STDOUT zurück.
+
+Für die Socketverwaltung kann jedes beliebige Tool verwendet werden, der einer Linux Distribution beiliegt, nachfolgend findet ihr eine Installationsanleitung für xinet.d. Ob es einen Äquivalent für Windows gibt ist mir unbekannt.
+
+1. Dateien an die vorgegebenen Stellen verschieben
+
+2. hmxmlbin ausführbar machen:
+
+	chmod +x hmxmlbin
+	
+3. Am Ende von /etc/services folgendes eintragen (ggf Port ändern)
+
+	hmxmlbin   8701/tcp         # Homematic bin to xml proxy
+
+4. Xinet.d Neustarten
+
+5. in der Datei /usr/bin/hmxmlbin die IP/Adresse anpassen
+	
+	// Homematic CUxD order anderes Interface
+	$hm_host = 'HOMEMATIC_IP';
+	$hm_port = 'HOMEMATIC_PORT';
+	// XMLRPC Server wird für bidirektionalle Kommunikation gebruacht
+	$url = "http://HMS_IP/hms/modules/Homematic/Server.class.php"; 
+	
+	
+Bei Bedarf DEBUG einschalten, dann können alle Meldungen im Syslog analysiert werden

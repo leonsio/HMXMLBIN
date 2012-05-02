@@ -1,0 +1,844 @@
+#!/usr/bin/php5
+<?php
+/**
+ * Homematic BIN / XML RPC Live Converter
+ * @version 0.2
+ * @copyright Leonid Kogan <leon@leonsio.com>
+ * @license GPL 3.0 
+ */
+
+// Homematic CUxD order anderes Interface
+$hm_host = 'HOMEMATIC_IP';
+$hm_port = 'HOMEMATIC_PORT';
+// XMLRPC Server wird für bidirektionalle Kommunikation gebruacht
+$url = "http://HMS_IP/hms/modules/Homematic/Server.class.php";
+
+
+// Debug auf true setzen, zum aktivieren. Ausgabe wird nach syslog(debug) geschrieben
+define('DEBUG', false);
+
+##################################
+#                                #
+#        DO NOT EDIT             #
+#                                #
+##################################
+// Fehler deaktivieren
+error_reporting(0);
+// Größe der zu lesenden Dateien;
+define('CHUNK_SIZE', 102400);
+// 100kb Daten lesen, mehr sollte nicht kommen
+$data = fread(STDIN, CHUNK_SIZE);
+// Detect Type
+$type = detect_type($data);
+// Verarbeitung
+switch ($type)
+{
+    case 'bin':
+        // BIN Classe initalisieren
+        $xmlrpc_bin = new XMLRPC_BIN();
+        // Eingabe parsen
+        $output = $xmlrpc_bin->parse_message($data);
+        // Nachricht als XML weiterleiten
+        if (! is_null($url))
+        {
+            // HTTP Classe initalisieren
+            $xmlrpc_http = new XMLRPC_HTTP();
+            // XML generieren
+            $xml = $xmlrpc_http->asXML($output['methodName'], $output['body']);
+            // Anfrage senden
+            $xml_output = $xmlrpc_http->send_http($url, $xml);
+            // Antwort parsen
+            $data = $xmlrpc_http->parse_body($xml_output['content']);
+            // Falls wir eine Antwort erhalten haben, diese weiterleiten
+            if(trim($data) != '')
+            {
+                // Antwort Umwandeln
+                $bin = $xmlrpc_bin->asBIN($xmlrpc_http->getXMLMethod(), $data, 'response');
+                // Antwort versenden
+                $bin_output = $xmlrpc_bin->send_bin($hm_host, $hm_port, $bin);
+                // Ausgeben
+                fwrite(STDOUT, $bin_output);
+            }
+            else
+            {
+                // Antwort ausgeben
+                fwrite(STDOUT, $xmlrpc_bin->ok());
+            }
+        }
+        else
+        {
+            // Antwort ausgeben
+            fwrite(STDOUT, $xmlrpc_bin->ok());
+        }
+        break;
+    case 'http':
+        // HTTP Classe initalisieren
+        $xmlrpc_http = new XMLRPC_HTTP();
+        // Eingabe parsen
+        $output = $xmlrpc_http->parse_message($data);
+        // BIN Classe initalisieren
+        $xmlrpc_bin = new XMLRPC_BIN();
+        // Eingabe umwandeln in BIN
+        $bin = $xmlrpc_bin->asBIN($output['methodName'], $output['body'], 'request');
+        // Anfrage versenden als BIN
+        $bin_output = $xmlrpc_bin->send_bin($hm_host, $hm_port, $bin);
+        // Antwort parsen in BIN
+        $output = $xmlrpc_bin->parse_message($bin_output);
+        // XML generieren
+        $xml = $xmlrpc_http->asXML($output['methodName'], $output['body']);
+        // XML Ausgeben
+        $xmlrpc_http->answer_http($xml);       
+        break;
+}
+
+/**
+ * Klasse zur Verarbeitung und Generierung von XMLRPC Nachrichten
+ */
+class XMLRPC_HTTP
+{
+    /**
+     * Gibt an ob es sich um multicall handelt
+     * 
+     * @var string
+     */
+    private $methodName = null;
+    
+    /**
+     *
+     *
+     * Parst den HTTP Header
+     *
+     * @param $header string           
+     * @return array
+     */
+    public function parse_headers ($header)
+    {
+        $retVal = array();
+        $fields = explode("\r\n", 
+                preg_replace('/\x0D\x0A[\x09\x20]+/', ' ', $header));
+        foreach ($fields as $field)
+        {
+            if (preg_match('/([^:]+): (.+)/m', $field, $match))
+            {
+                $match[1] = preg_replace('/(?<=^|[\x09\x20\x2D])./e', 
+                        'strtoupper("\0")', strtolower(trim($match[1])));
+                if (isset($retVal[$match[1]]))
+                {
+                    $retVal[$match[1]] = array($retVal[$match[1]], $match[2]);
+                }
+                else
+                {
+                    $retVal[$match[1]] = trim($match[2]);
+                }
+            }
+        }
+        return $retVal;
+    }
+
+    /**
+     *
+     * @param $data string           
+     * @return array
+     */
+    public function parse_message ($data)
+    {
+        // Daten verarbeiten
+        $data = explode("\n\r", $data, 2);
+        $this->data = $data;
+        // Header parsen
+        $header = $this->parse_headers($data[0]);
+        // Body parsen
+        $body = $this->parse_body($data[1]);
+        // Ausgabe
+        return array(
+                    'type' => $header, 
+                    'body' => $body, 
+                    'methodName' => $this->methodName);
+    }
+    /**
+     * Gibt ermittelte Methode zurück
+     */
+    public function getXMLMethod()
+    {
+        return $this->methodName;
+    }
+    /**
+     *
+     * @param $body string           
+     * @return array
+     */
+    public function parse_body ($body)
+    {
+        $method = null;
+        $output = xmlrpc_decode_request(trim($body), &$method);
+        $this->methodName = $method;
+        return $output;
+    }
+
+    /**
+     * Konverteirt ein Array in XML
+     *
+     * @param $methode string           
+     * @param $data array           
+     */
+    public function asXML ($methode, $data)
+    {       
+        if(trim($methode) != '')
+        {
+            $xml=xmlrpc_encode_request($methode, $data);
+        }
+        else
+        {
+            // kleine korrektur
+            if(isset($data[0]))
+            {
+                $data=$data[0];
+            }
+            $xml=xmlrpc_encode($data);
+        }
+        // debugoutput
+        write_debug($xml);
+        // Ausgabe
+        return $xml;
+    }
+    /**
+     * Gibt standardantwort zurück
+     * @param string $data
+     */
+    public function answer_http($data)
+    {
+        $buf[] = "HTTP/1.1";
+        $buf[] = "200 OK";
+        $buf[] = "Server: HM_RPC_ROUTER 0.1";
+        $buf[] = "Content-length: " . strlen($data);
+        $buf[] = "Content-type: text/xml";
+        $buf[] = "";
+        $buf[] = $data;
+        $buf = implode(PHP_EOL, $buf);
+        // Ausgabe
+        echo $buf;
+        // debugoutput
+        write_debug($buf);
+    }
+    /**
+     * Sendet eine XML-RPC Anfrage an den Server
+     * 
+     * @param $url string           
+     * @param $xml string           
+     */
+    public function send_http ($url, $data)
+    {
+        $data_len = strlen($data);
+        $http_response_header=null;
+        // debugoutput
+        write_debug($url);
+        write_debug($data);
+        return array(
+                    'content' => file_get_contents($url, false, 
+                            stream_context_create(
+                                    array(
+                                        'http' => array(
+                                                        'method' => 'POST', 
+                                                        'header' => "Connection: close\r\nServer: HM_XMLRPC_BIN 0.1\r\nContent-Type: text/xml\r\nContent-Length: $data_len\r\n", 
+                                                        'content' => $data)))), 
+                    'headers' => $http_response_header);
+    }
+}
+
+/**
+ * Klasse zur Verarbeitung und Generierung von BINRPC Nachrichten
+ */
+class XMLRPC_BIN
+{
+
+    /**
+     * Header einer Anfrage
+     *
+     * @var string
+     */
+    private $header_request = '42696E000000';
+
+    /**
+     * Header eines Antworts
+     *
+     * @var string
+     */
+    private $header_response = '42696E010000';
+
+    /**
+     * Standardantwort "OK"
+     *
+     * @var string
+     */
+    private $ok = '42696E01000000080000000300000000';
+
+    /**
+     * Gibt an ob es sich hierbei um Request oder Response handelt
+     *
+     * @var string
+     */
+    private $message_type = null;
+
+    /**
+     * Gibt an ob es sich um multicall handelt
+     * 
+     * @var string
+     */
+    private $methodName = null;
+    /**
+     *
+     *
+     * Parst den HTTP Header
+     *
+     * @param $header string           
+     * @return array
+     */
+    public function parse_headers ($header)
+    {
+        // Typ ermitteln
+        if ($this->header_request == $header)
+        {
+            $this->message_type = 'request';
+        }
+        elseif ($this->header_response == $header)
+        {
+            $this->message_type = 'response';
+        }
+        else
+        {
+            die('wrong message type');
+        }
+        // Ausgabe
+        return $this->message_type;
+    }
+
+    /**
+     *
+     * @param $data string           
+     * @return array
+     */
+    public function parse_message ($data)
+    {
+        // Debug
+        write_debug(bin2hex($data));
+        // Daten verarbeiten
+        $data = unpack('H12header/C*', $data);
+        // Header parsen
+        $header = $this->parse_headers(strtoupper(array_shift($data)));
+        // Body parsen
+        $body = $this->parse_body($data);
+        // Ausgabe
+        return array(
+                    'type' => $header, 
+                    'body' => $body, 
+                    'methodName' => $this->methodName);
+    
+    }
+
+    /**
+     * Verarbeitet die Nachricht in ein array
+     *
+     * @param $body array
+     *            binäres array
+     * @return array
+     */
+    public function parse_body ($data)
+    {
+        // Initalisierung
+        $array = array();
+        // Request bearbeiten
+        if($this->message_type=='request')
+        {
+            $muster = "@6/A{$data[5]}methode/H8elements";
+            $unpack = unpack($muster, $this->pack_array($data));
+            // Methode merken
+            $this->methodName = $unpack['methode'];
+            // Anzahl elemente bestimmen
+            $elements = hexdec($unpack['elements']);
+            // aktuelle Position bestimmen
+            $pos = 10 + $data[5];
+        }
+        else // Response bearbeiten
+        {
+            $elements = 1;
+            $pos=2;
+        }
+        // array verkürzen
+        $data = array_splice($data, $pos);
+        // jedes Element durchlaufen
+        for ($i = 0; $i < $elements; $i ++)
+        {
+            // Typ des Elements bestimmen
+            $type = unpack('H8type', $this->pack_array($data));
+            // bereinigen
+            $data = array_slice($data, 4);
+            // Typen verarbeiten
+            $output=$this->_detect_bin_type(hexdec($type['type']), $data);
+            // Array schreiben
+            $array[] = $output;
+        }
+        // debugoutput
+        write_debug($array);
+        // Ausgabe        
+        return $array;
+    }
+    /**
+     * Verarbeitet die verschiedenen Datentypen
+     * @param int $type
+     * @param array $data
+     * @return mixed
+     */
+    private function _detect_bin_type($type, $data)
+    {
+        // Vorbereitung
+        $output=null;
+        // Typ bestimmen und Methode ausführen
+        switch ($type)
+        {
+            // array
+            case '256':
+                $output = $this->_array_get(&$data);
+                break;
+                // struct
+            case '257':
+                $output = $this->_struct_get(&$data);
+                break;
+                // int
+            case '1':
+                $output = $this->_int_get(&$data);
+                break;
+                // boolean
+            case '2':
+                $output = $this->_boolean_get(&$data);
+                break;
+                // string
+            case '3':
+                $output = $this->_string_get(&$data);
+                break;
+                // double
+            case '4':
+                $output = $this->_double_get(&$data);
+                break;
+        }
+        // Ausgabe
+        return $output;
+    }
+    /**
+     * Verarbeitet verschiedene Datentypen
+     * 
+     * @param mixed $key
+     * @param mixed $value
+     * @return string
+     */
+    private function _detect_type($key, $value)
+    {
+        // Vorbereitung
+        $string=null;
+        // array = indiziertes array
+        if(is_array($value) && isset($value[0]))
+        {
+            $string.='00000100'.$this->_array_set($value);
+        }
+        // struct = assoziatives array
+        else if(is_array($value) && count($value) > 0 && !isset($value[0]))
+        {
+            $string.='00000101'.$this->_struct_set($value);
+        }
+        // string
+        elseif(is_string($value))
+        {
+            $string.='00000003'.$this->_string_set($value);
+        }
+        // boolean
+        elseif(is_bool($value))
+        {
+            $string.='00000002'.$this->_boolean_set($value);
+        }
+        // integer
+        elseif(is_int($value))
+        {
+            $string.='00000001'.$this->_int_set($value);
+        }
+        // float
+        elseif(is_float($value))
+        {
+            $string.='00000004'.$this->_double_set($value);
+        }
+        else
+        {
+            die('wrong type');
+        }  
+        // Ausgabe
+        return $string;      
+    }
+    /**
+     * Verpackt ein binäres array in ein binäres string
+     *
+     * @param $arr array           
+     */
+    private function pack_array ($arr)
+    {
+        return call_user_func_array('pack', array_merge(array("C*"), $arr));
+    }
+
+    /**
+     * Parst ein Array 0x100
+     * 
+     * @param $data array           
+     * @return array
+     */
+    private function _array_get (&$data)
+    {
+        // Initalisierung
+        $array = array();
+        $output = null;
+        // Anzahl der Elemente bestimmen
+        $count = unpack('H8count', $this->pack_array($data));
+        $count = hexdec($count['count']);
+        // Array bereinigen
+        array_splice($data, 0, 4);
+        // Alle Elemente durchlaufen
+        for ($i = 0; $i < $count; $i ++)
+        {
+            // Typ des Elements bestimmen
+            $type = unpack('H8type', $this->pack_array($data));
+            // bereinigen
+            array_splice($data,0, 4);
+            // Typen verarbeiten
+            $output=$this->_detect_bin_type(hexdec($type['type']), &$data);  
+            // Array schreiben
+            $array[] = $output;
+        }
+        // Ausgabe
+        return $array;
+    }
+    /**
+     * Parst ein Array 0x100
+     *
+     * @param $data array
+     * @return array
+     */
+    private function _array_set ($data)
+    {
+        // Initalisierung
+        $string = '';
+        // Anzahl Elemente bestimmen
+        $elements = count($data);
+        // Anzahl Elemente setzen
+        $string .=$this->_int_set($elements);
+        // Jedes Element durchlaufen
+        foreach($data as $key => $value)
+        {
+            $string.=$this->_detect_type($key, $value);
+        }
+        // Ausgabe 
+        return $string;
+    }        
+    /**
+     * Parst ein Struct 0x101
+     * 
+     * @param $data array           
+     * @return array
+     */
+    private function _struct_get (&$data)
+    {        
+        // Initialstring
+        $array = array();
+        $output = null;
+        // Anzahl der Elemente bestimmen
+        $count = unpack('H8count', $this->pack_array($data));
+        $count = hexdec($count['count']);
+        // Array bereinigen
+        $data = array_slice($data, 4);
+        // Alle Elemente durchlaufen
+        for ($i = 0; $i < $count; $i ++)
+        {
+            // Typ des Elements bestimmen
+            $unpack = unpack("@3/C1length/A{$data[3]}method/H8type", 
+                    $this->pack_array($data));
+            // Position bestimmen
+            $pos = 8 + $data[3];
+            // bereinigen
+            $data = array_slice($data, $pos);
+            // Typen verarbeiten
+            $output=$this->_detect_bin_type(hexdec($unpack['type']), &$data);
+            // Array schreiben
+            $array[$unpack['method']] = $output;
+        }
+        // Ausgabe
+        return $array;
+    }
+    /**
+     * Parst ein Struct 0x101
+     *
+     * @param $data array
+     * @return array
+     */
+    private function _struct_set ($data)
+    {
+        // Initalisierung
+        $string = '';
+        // Anzahl Elemente bestimmen
+        $elements = count($data);
+        // Anzahl Elemente setzen
+        $string .=$this->_int_set($elements);
+        // Jedes Element durchlaufen
+        foreach($data as $key => $value)
+        {
+            // Name setzen
+            $string.=$this->_string_set($key);
+            // Wert setzen
+            $string.=$this->_detect_type($key, $value);
+        }
+        // Ausgabe
+        return $string;
+    }
+    /**
+     * parst ein String
+     * 
+     * @param $data array           
+     * @return string
+     */
+    private function _string_get (&$data)
+    {
+        // Typ des Elements bestimmen
+        $unpack = unpack("@3/C1length/A{$data[3]}string", 
+                $this->pack_array($data));
+        // Position bestimmen
+        $pos = 4 + $data[3];
+        // bereinigen
+        array_splice(&$data, 0, $pos);
+        // Ausgabe
+        return $unpack['string'];
+    }
+    /**
+     * Codiert String Datentypen gibt HEX Wert zurück
+     * @param string $string
+     * @return string
+     */
+    private function _string_set($string)
+    {  
+        // Platzhalter
+        $s=null;
+        // String formatieren           
+        foreach(str_split($string) as $c) 
+        {
+            $s.=sprintf("%02X",ord($c));
+        }
+        // Ausgabe
+        return sprintf('000000%02X%s', strlen($string), $s);
+    }
+    /**
+     * Parst einen Integer
+     * 
+     * @param $data array           
+     * @return int
+     */
+    private function _int_get (&$data)
+    {
+        // Typ des Elements bestimmen
+        $unpack = unpack("H8int", $this->pack_array($data));
+        // Position bestimmen
+        $pos = 4;
+        // bereinigen
+        $data = array_slice($data, $pos);
+        // Ausgabe
+        return hexdec($unpack['int']);
+    }
+    /**
+     * Codiert Integer Datentypen gibt HEX Wert zurück
+     * @param int $int
+     * @return string
+     */
+    private function _int_set($int)
+    {
+        return sprintf('%08X', $int);
+    }
+    /**
+     * Parst ein Boolean
+     *
+     * @param $data array           
+     * @return bool
+     */
+    private function _boolean_get (&$data)
+    {
+        // Typ des Elements bestimmen
+        $unpack = unpack("H2bool", $this->pack_array($data));
+        // Position bestimmen
+        $pos = 1;
+        // bereinigen
+        $data = array_slice($data, $pos);
+        // Ausgabe
+        return (bool) hexdec($unpack['bool']);
+    }
+    /**
+     * codiert bool Datentyp gibt HEX Wert zurück
+     * @param bool $bool
+     * @return string
+     */
+    private function _boolean_set($bool)
+    {
+        return dechex((int) $bool);
+    }
+
+    /**
+     * parst ein Double Type Wert
+     * 
+     * @param $data array           
+     * @return double
+     */
+    private function _double_get (&$data)
+    {
+        // Element decodieren
+        $unpack = unpack("Imantissa/H8exponent", $this->pack_array($data));
+        // Daten umwandeln
+        $unpack['exponent'] = hexdec($unpack['exponent']);
+        $unpack['mantissa'] = $this->ntohl($unpack['mantissa']);
+        // Position bestimmen
+        $pos = 8;
+        // bereinigen
+        $data = array_slice($data, $pos);
+        // Ausgabe
+        return round($unpack['mantissa'] / (1 << 30) / pow(2, -$unpack['exponent']), 2);
+    }
+    /**
+     * Codiert double/float Datentypen gibt HEX Wert zurück
+     * @param float $float
+     * @return string
+     */
+    private function _double_set($float)
+    {
+        $exponent = ( floor(log($float, 2)) + 1 );
+        $mantissa = ( $float * pow(2, -$exponent) ) * (1 << 30);
+        $mantissa = pack("N", $mantissa);
+
+        return sprintf('%s%08X', $mantissa, $exponent);
+    }
+    /**
+     * Default Antwort: alles OK ausgeben
+     * @return string
+     */
+    public function ok ()
+    {
+        return pack("H*", $this->ok);
+    }
+    /**
+     * Network to Host Long Umwandlung
+     * Hilfsfunktion für Double Berechnung
+     * 
+     * @param int $str
+     */
+    private function ntohl($str){
+        $arr = unpack('I', pack('N', $str));
+        return $arr[1];
+    }
+
+    /**
+     * Gibt aktuelles XML Objekt als Binäre Datei zurück
+     *
+     * @param string $methode
+     * @param string $data  
+     * @return string           
+     */
+    public function asBIN ($methode, $data, $type='request')
+    {
+        // Header vorbereiten
+        $header = ($type == 'request') ? $this->header_request : $this->header_response;
+        // Initalisierung
+        $string = '';
+        // Methode Setzen
+        $string .=$this->_string_set($methode);
+        // Anzahl Elemente bestimmen
+        $elements = count($data);
+        // Anzahl Elemente setzen
+        $string .=$this->_int_set($elements);
+        // Jedes Element durchlaufen
+        foreach($data as $key => $value)
+        {
+            $string.=$this->_detect_type($key, $value);          
+        }
+        // Nachrichtgröße bestimmen
+        $size = unpack("C*", pack("H*", $string));
+        // Ausgabe vorbereiten
+        $string = $header .sprintf("%04X",count($size)) . $string;
+        // debugoutput
+        write_debug($string);        
+        // Ausgabe 
+        return pack("H*" , $string);
+    }
+    /**
+     * Sendet die Daten an die Homematic
+     * 
+     * @param string $host
+     * @param int $port
+     * @param string $data
+     */
+    public function send_bin($host, $port, $data)
+    {
+        // Socket aufmachen
+        $fp = fsockopen($host, $port);
+        // Inhalt schreiben
+        fwrite($fp, $data);
+        // Ausgabe lesen
+        $output = fread($fp, CHUNK_SIZE);        
+        // Socket schliessen
+        fclose($fp);
+        // Ausgabe
+        return $output;
+    }
+}
+
+/**
+ * Prüft die Art der Anfrage
+ *
+ * @param $data string           
+ */
+function detect_type ($data)
+{
+    // Falls die Anfrage mit POST beginnt
+    if(substr(trim($data), 0, 4) == 'POST')
+    {
+        return 'http';
+    }
+    
+    $output = unpack("A3header", $data);
+    if($output['header'] == 'Bin')
+    {
+        return 'bin';
+    }
+    
+    return false;
+}
+
+/**
+ * Hilfsfunktion zum Debugen
+ * 
+ * @param mixed $data
+ * @param boolean $hex
+ */
+function write_debug($data, $hex = false)
+{
+    if(DEBUG)
+    {
+        // output besorgen
+        $debug = debug_backtrace();
+        // Klasse bestimmen
+        $class = $debug[1]['class'];
+        // Methode bestimmen
+        $function = $debug[1]['function'];
+        // als HEX in den syslog schreiben
+        if($hex)
+        {
+            $data = pack("H*", $data);
+        }
+        // array zu String umwandeln
+        if(is_array($data))
+        {
+            $data = print_r($data, 1);
+        }
+        // Ausgabe
+        syslog(LOG_DEBUG, sprintf("%s - %s: %s", $class, $function, $data));
+    }
+}
+
+?>
